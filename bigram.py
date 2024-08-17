@@ -1,3 +1,19 @@
+import time
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+
+
+# hyperparameters
+batch_size = 4
+block_size = 8
+eval_iters = 200
+max_iters = 3000
+eval_interval = 300
+learning_rate = 1e-2
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#-------------
+
 with open("tiny-shakespeare.txt", "r") as f:
     text = f.read()
 
@@ -9,38 +25,15 @@ itoc = {i: c for i, c in enumerate(chars)}
 encode = lambda s: [stoi[c] for c in s]
 decode = lambda a: "".join([itoc[x] for x in a])
 
-
-import torch
-import time
-
 data = torch.tensor(encode(text), dtype=torch.long)
 
+# Create train/test splits
 n = int(0.9 * len(data))
 train_data = data[:n]
 val_data = data[n:]
 
-# The important thing to realize is when we train a transformer, we work with chunks
-# of the training set -- randomly sampling these chunks with a max length. Call it
-# block size.
-block_size = 8
 
-# We will train the transformer to predict the next character at each position in the sequence.
-print(train_data[: block_size + 1])
-
-# There are eight examples in a chunk of nine characters.
-x = train_data[:block_size]
-y = train_data[1 : block_size + 1]
-for t in range(block_size):
-    context = x[: t + 1]
-    target = y[t]
-    print(f"When input is {context} the target is {target}")
-
-torch.manual_seed(1337)
-batch_size = 4
-block_size = 8
-
-
-def get_batch(split, device="cpu"):
+def get_batch(split):
     data = train_data if split == "train" else val_data
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([data[i : i + block_size] for i in ix]).to(device)
@@ -48,9 +41,19 @@ def get_batch(split, device="cpu"):
     return x, y
 
 
-import torch
-import torch.nn as nn
-from torch.nn import functional as F
+@torch.no_grad
+def estimate_loss(model):
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            logits, loss = model(X, Y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
 
 
 class BigramLanguageModel(nn.Module):
@@ -82,33 +85,22 @@ class BigramLanguageModel(nn.Module):
         return idx
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = 'cpu'
-# xb, yb = get_batch("train", device=device)
 m = BigramLanguageModel(vocab_size).to(device)
-out, loss = m(xb, yb)
 
-print(out.shape)
-print(loss)
-
-print(decode(m.generate(torch.zeros((1, 1), dtype=torch.long).to(device), max_new_tokens=100)[0].tolist()))
-
-optimizer = torch.optim.AdamW(m.parameters(), lr=1e-3)  # usually a good one is 1e-4, but smaller networks can have 1e-3 or bigger
-batch_size = 32
-start = time.monotonic()
-for steps in range(50000):
-    xb, yb = get_batch('train', device=device)
+optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate)
+for iter in range(max_iters):
+    if iter % eval_interval == 0:
+        losses = estimate_loss(m)
+        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+    
+    xb, yb = get_batch('train')
 
     logits, loss = m(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
-    print(loss.item())
 
-    if loss.item() < 2.5:
-        break
-end = time.monotonic()
 
-print(f"Final loss {loss.item()} in {end-start} seconds")
+context = torch.zeros((1, 1), dtype=torch.long).to(device)
+print(decode(m.generate(context, max_new_tokens=100)[0].tolist()))
 
-print(decode(m.generate(torch.zeros((1, 1), dtype=torch.long).to(device), max_new_tokens=100)[0].tolist()))
